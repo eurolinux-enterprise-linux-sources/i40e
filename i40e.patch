@@ -1,0 +1,462 @@
+From bf02eb86a737c25569e957de7e269017715dc41c Mon Sep 17 00:00:00 2001
+From: Petr Oros <poros@redhat.com>
+Date: Wed, 25 May 2016 10:01:53 +0200
+Subject: [PATCH] Backport i40evf for 3.10.0-327.el7
+
+Signed-off-by: Petr Oros <poros@redhat.com>
+---
+ drivers/net/ethernet/intel/i40e/i40e.h             |  3 +-
+ drivers/net/ethernet/intel/i40e/i40e_ethtool.c     | 14 -----
+ drivers/net/ethernet/intel/i40e/i40e_fcoe.c        |  2 +-
+ drivers/net/ethernet/intel/i40e/i40e_main.c        | 71 +++++++++++++---------
+ drivers/net/ethernet/intel/i40e/i40e_txrx.c        | 20 +++---
+ drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c | 65 +++-----------------
+ drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.h |  2 -
+ 7 files changed, 63 insertions(+), 114 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/i40e/i40e.h b/drivers/net/ethernet/intel/i40e/i40e.h
+index 00c4738..0e0277d 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e.h
++++ b/drivers/net/ethernet/intel/i40e/i40e.h
+@@ -824,8 +824,7 @@ bool i40e_is_vsi_in_vlan(struct i40e_vsi *vsi);
+ struct i40e_mac_filter *i40e_find_mac(struct i40e_vsi *vsi, u8 *macaddr,
+ 				      bool is_vf, bool is_netdev);
+ #ifdef I40E_FCOE
+-int __i40e_setup_tc(struct net_device *netdev, u32 handle, __be16 proto,
+-		    struct tc_to_netdev *tc);
++int __i40e_setup_tc(struct net_device *netdev, u8 tc);
+ void i40e_netpoll(struct net_device *netdev);
+ int i40e_fcoe_enable(struct net_device *netdev);
+ int i40e_fcoe_disable(struct net_device *netdev);
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_ethtool.c b/drivers/net/ethernet/intel/i40e/i40e_ethtool.c
+index 05c3159..bcc8bf2 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_ethtool.c
++++ b/drivers/net/ethernet/intel/i40e/i40e_ethtool.c
+@@ -1941,12 +1941,6 @@ static int i40e_get_coalesce(struct net_device *netdev,
+ 	return __i40e_get_coalesce(netdev, ec, -1);
+ }
+ 
+-static int i40e_get_per_queue_coalesce(struct net_device *netdev, u32 queue,
+-				       struct ethtool_coalesce *ec)
+-{
+-	return __i40e_get_coalesce(netdev, ec, queue);
+-}
+-
+ static void i40e_set_itr_per_queue(struct i40e_vsi *vsi,
+ 				   struct ethtool_coalesce *ec,
+ 				   int queue)
+@@ -2051,12 +2045,6 @@ static int i40e_set_coalesce(struct net_device *netdev,
+ 	return __i40e_set_coalesce(netdev, ec, -1);
+ }
+ 
+-static int i40e_set_per_queue_coalesce(struct net_device *netdev, u32 queue,
+-				       struct ethtool_coalesce *ec)
+-{
+-	return __i40e_set_coalesce(netdev, ec, queue);
+-}
+-
+ /**
+  * i40e_get_rss_hash_opts - Get RSS hash Input Set for each flow type
+  * @pf: pointer to the physical function struct
+@@ -2944,8 +2932,6 @@ static const struct ethtool_ops i40e_ethtool_ops = {
+ 	.get_ts_info		= i40e_get_ts_info,
+ 	.get_priv_flags		= i40e_get_priv_flags,
+ 	.set_priv_flags		= i40e_set_priv_flags,
+-	.get_per_queue_coalesce	= i40e_get_per_queue_coalesce,
+-	.set_per_queue_coalesce	= i40e_set_per_queue_coalesce,
+ };
+ 
+ void i40e_set_ethtool_ops(struct net_device *netdev)
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_fcoe.c b/drivers/net/ethernet/intel/i40e/i40e_fcoe.c
+index 10ef8e8..34dd2e9 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_fcoe.c
++++ b/drivers/net/ethernet/intel/i40e/i40e_fcoe.c
+@@ -1467,7 +1467,7 @@ static const struct net_device_ops i40e_fcoe_netdev_ops = {
+ 	.ndo_tx_timeout		= i40e_tx_timeout,
+ 	.ndo_vlan_rx_add_vid	= i40e_vlan_rx_add_vid,
+ 	.ndo_vlan_rx_kill_vid	= i40e_vlan_rx_kill_vid,
+-	.ndo_setup_tc		= __i40e_setup_tc,
++	.ndo_setup_tc		= i40e_setup_tc,
+ 
+ #ifdef CONFIG_NET_POLL_CONTROLLER
+ 	.ndo_poll_controller	= i40e_netpoll,
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_main.c b/drivers/net/ethernet/intel/i40e/i40e_main.c
+index 355d18f..a07b021 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_main.c
++++ b/drivers/net/ethernet/intel/i40e/i40e_main.c
+@@ -111,6 +111,17 @@ MODULE_VERSION(DRV_VERSION);
+ 
+ static struct workqueue_struct *i40e_wq;
+ 
++#ifdef CONFIG_OF
++static inline struct device_node *pci_bus_to_OF_node(struct pci_bus *bus)
++{
++        return bus ? bus->dev.of_node : NULL;
++}
++
++#else /* CONFIG_OF */
++static inline struct device_node *
++pci_device_to_OF_node(const struct pci_dev *pdev) { return NULL; }
++#endif  /* CONFIG_OF */
++
+ /**
+  * i40e_allocate_dma_mem_d - OS specific memory alloc for shared code
+  * @hw:   pointer to the HW structure
+@@ -2081,12 +2092,6 @@ int i40e_sync_vsi_filters(struct i40e_vsi *vsi)
+ 		}
+ 	}
+ 
+-	/* if the VF is not trusted do not do promisc */
+-	if ((vsi->type == I40E_VSI_SRIOV) && !pf->vf[vsi->vf_id].trusted) {
+-		clear_bit(__I40E_FILTER_OVERFLOW_PROMISC, &vsi->state);
+-		goto out;
+-	}
+-
+ 	/* check for changes in promiscuous modes */
+ 	if (changed_flags & IFF_ALLMULTI) {
+ 		bool cur_multipromisc;
+@@ -5280,7 +5285,11 @@ void i40e_down(struct i40e_vsi *vsi)
+  * @netdev: net device to configure
+  * @tc: number of traffic classes to enable
+  **/
++#ifdef I40E_FCOE
++int i40e_setup_tc(struct net_device *netdev, u8 tc)
++#else
+ static int i40e_setup_tc(struct net_device *netdev, u8 tc)
++#endif
+ {
+ 	struct i40e_netdev_priv *np = netdev_priv(netdev);
+ 	struct i40e_vsi *vsi = np->vsi;
+@@ -5333,19 +5342,6 @@ exit:
+ 	return ret;
+ }
+ 
+-#ifdef I40E_FCOE
+-int __i40e_setup_tc(struct net_device *netdev, u32 handle, __be16 proto,
+-		    struct tc_to_netdev *tc)
+-#else
+-static int __i40e_setup_tc(struct net_device *netdev, u32 handle, __be16 proto,
+-			   struct tc_to_netdev *tc)
+-#endif
+-{
+-	if (handle != TC_H_ROOT || tc->type != TC_SETUP_MQPRIO)
+-		return -EINVAL;
+-	return i40e_setup_tc(netdev, tc->tc);
+-}
+-
+ /**
+  * i40e_open - Called when a network interface is made active
+  * @netdev: network interface device structure
+@@ -8884,7 +8880,7 @@ static int i40e_get_phys_port_id(struct net_device *netdev,
+  */
+ static int i40e_ndo_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
+ 			    struct net_device *dev,
+-			    const unsigned char *addr, u16 vid,
++			    const unsigned char *addr,
+ 			    u16 flags)
+ {
+ 	struct i40e_netdev_priv *np = netdev_priv(dev);
+@@ -8894,11 +8890,6 @@ static int i40e_ndo_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
+ 	if (!(pf->flags & I40E_FLAG_SRIOV_ENABLED))
+ 		return -EOPNOTSUPP;
+ 
+-	if (vid) {
+-		pr_info("%s: vlans aren't supported yet for dev_uc|mc_add()\n", dev->name);
+-		return -EINVAL;
+-	}
+-
+ 	/* Hardware does not support aging addresses so if a
+ 	 * ndm_state is given only allow permanent addresses
+ 	 */
+@@ -9049,7 +9040,7 @@ static netdev_features_t i40e_features_check(struct sk_buff *skb,
+ 	if (skb->encapsulation &&
+ 	    ((skb_inner_network_header(skb) - skb_transport_header(skb)) >
+ 	     I40E_MAX_TUNNEL_HDR_LEN))
+-		return features & ~(NETIF_F_CSUM_MASK | NETIF_F_GSO_MASK);
++		return features & ~(NETIF_F_ALL_CSUM | NETIF_F_GSO_MASK);
+ 
+ 	return features;
+ }
+@@ -9070,7 +9061,7 @@ static const struct net_device_ops i40e_netdev_ops = {
+ #ifdef CONFIG_NET_POLL_CONTROLLER
+ 	.ndo_poll_controller	= i40e_netpoll,
+ #endif
+-	.ndo_setup_tc		= __i40e_setup_tc,
++	.ndo_setup_tc		= i40e_setup_tc,
+ #ifdef I40E_FCOE
+ 	.ndo_fcoe_enable	= i40e_fcoe_enable,
+ 	.ndo_fcoe_disable	= i40e_fcoe_disable,
+@@ -9082,7 +9073,6 @@ static const struct net_device_ops i40e_netdev_ops = {
+ 	.ndo_get_vf_config	= i40e_ndo_get_vf_config,
+ 	.ndo_set_vf_link_state	= i40e_ndo_set_vf_link_state,
+ 	.ndo_set_vf_spoofchk	= i40e_ndo_set_vf_spoofchk,
+-	.ndo_set_vf_trust	= i40e_ndo_set_vf_trust,
+ #if IS_ENABLED(CONFIG_VXLAN)
+ 	.ndo_add_vxlan_port	= i40e_add_vxlan_port,
+ 	.ndo_del_vxlan_port	= i40e_del_vxlan_port,
+@@ -9136,7 +9126,7 @@ static int i40e_config_netdev(struct i40e_vsi *vsi)
+ 				   NETIF_F_GSO_SIT		|
+ 				   NETIF_F_GSO_UDP_TUNNEL	|
+ 				   NETIF_F_GSO_UDP_TUNNEL_CSUM	|
+-				   NETIF_F_SCTP_CRC		|
++				   NETIF_F_SCTP_CSUM		|
+ 				   NETIF_F_RXHASH		|
+ 				   NETIF_F_RXCSUM		|
+ 				   0;
+@@ -10729,6 +10719,29 @@ static void i40e_print_features(struct i40e_pf *pf)
+ 	WARN_ON(i > INFO_STRING_LEN);
+ }
+ 
++static int eth_platform_get_mac_address(struct device *dev, u8 *mac_addr)
++{
++        const unsigned char *addr;
++        struct device_node *dp;
++
++        if (dev_is_pci(dev))
++                dp = pci_device_to_OF_node(to_pci_dev(dev));
++        else
++                dp = dev->of_node;
++
++        addr = NULL;
++        if (dp)
++                addr = of_get_mac_address(dp);
++        if (!addr)
++                addr = NULL;
++
++        if (!addr)
++                return -ENODEV;
++
++        ether_addr_copy(mac_addr, addr);
++        return 0;
++}
++
+ /**
+  * i40e_get_platform_mac_addr - get platform-specific MAC address
+  *
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_txrx.c b/drivers/net/ethernet/intel/i40e/i40e_txrx.c
+index 82b69b8..84409b6 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_txrx.c
++++ b/drivers/net/ethernet/intel/i40e/i40e_txrx.c
+@@ -636,21 +636,19 @@ u32 i40e_get_tx_pending(struct i40e_ring *ring, bool in_sw)
+ 
+ /**
+  * i40e_clean_tx_irq - Reclaim resources after transmit completes
+- * @vsi: the VSI we care about
+- * @tx_ring: Tx ring to clean
+- * @napi_budget: Used to determine if we are in netpoll
++ * @tx_ring:  tx ring to clean
++ * @budget:   how many cleans we're allowed
+  *
+  * Returns true if there's any budget left (e.g. the clean is finished)
+  **/
+-static bool i40e_clean_tx_irq(struct i40e_vsi *vsi,
+-			      struct i40e_ring *tx_ring, int napi_budget)
++static bool i40e_clean_tx_irq(struct i40e_ring *tx_ring, int budget)
+ {
+ 	u16 i = tx_ring->next_to_clean;
+ 	struct i40e_tx_buffer *tx_buf;
+ 	struct i40e_tx_desc *tx_head;
+ 	struct i40e_tx_desc *tx_desc;
+-	unsigned int total_bytes = 0, total_packets = 0;
+-	unsigned int budget = vsi->work_limit;
++	unsigned int total_packets = 0;
++	unsigned int total_bytes = 0;
+ 
+ 	tx_buf = &tx_ring->tx_bi[i];
+ 	tx_desc = I40E_TX_DESC(tx_ring, i);
+@@ -680,7 +678,7 @@ static bool i40e_clean_tx_irq(struct i40e_vsi *vsi,
+ 		total_packets += tx_buf->gso_segs;
+ 
+ 		/* free the skb */
+-		napi_consume_skb(tx_buf->skb, napi_budget);
++		dev_consume_skb_any(tx_buf->skb);
+ 
+ 		/* unmap skb header data */
+ 		dma_unmap_single(tx_ring->dev,
+@@ -751,7 +749,7 @@ static bool i40e_clean_tx_irq(struct i40e_vsi *vsi,
+ 
+ 		if (budget &&
+ 		    ((j / (WB_STRIDE + 1)) == 0) && (j != 0) &&
+-		    !test_bit(__I40E_DOWN, &vsi->state) &&
++		    !test_bit(__I40E_DOWN, &tx_ring->vsi->state) &&
+ 		    (I40E_DESC_UNUSED(tx_ring) != tx_ring->count))
+ 			tx_ring->arm_wb = true;
+ 	}
+@@ -769,7 +767,7 @@ static bool i40e_clean_tx_irq(struct i40e_vsi *vsi,
+ 		smp_mb();
+ 		if (__netif_subqueue_stopped(tx_ring->netdev,
+ 					     tx_ring->queue_index) &&
+-		   !test_bit(__I40E_DOWN, &vsi->state)) {
++		   !test_bit(__I40E_DOWN, &tx_ring->vsi->state)) {
+ 			netif_wake_subqueue(tx_ring->netdev,
+ 					    tx_ring->queue_index);
+ 			++tx_ring->tx_stats.restart_queue;
+@@ -1982,7 +1980,7 @@ int i40e_napi_poll(struct napi_struct *napi, int budget)
+ 	 * budget and be more aggressive about cleaning up the Tx descriptors.
+ 	 */
+ 	i40e_for_each_ring(ring, q_vector->tx) {
+-		if (!i40e_clean_tx_irq(vsi, ring, budget)) {
++		if (!i40e_clean_tx_irq(ring, vsi->work_limit)) {
+ 			clean_complete = false;
+ 			continue;
+ 		}
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c b/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c
+index ba2d377..fcf6d54 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c
++++ b/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.c
+@@ -860,14 +860,7 @@ static int i40e_alloc_vf_res(struct i40e_vf *vf)
+ 	if (ret)
+ 		goto error_alloc;
+ 	total_queue_pairs += pf->vsi[vf->lan_vsi_idx]->alloc_queue_pairs;
+-
+-	/* RHEL7.3 keep vf trusted for now */
+-	vf->trusted = 1;
+-
+-	if (vf->trusted)
+-		set_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps);
+-	else
+-		clear_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps);
++	set_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps);
+ 
+ 	/* store the total qps number for the runtime
+ 	 * VF req validation
+@@ -1858,17 +1851,15 @@ static inline int i40e_check_vf_permission(struct i40e_vf *vf, u8 *macaddr)
+ 		dev_err(&pf->pdev->dev, "invalid VF MAC addr %pM\n", macaddr);
+ 		ret = I40E_ERR_INVALID_MAC_ADDR;
+ 	} else if (vf->pf_set_mac && !is_multicast_ether_addr(macaddr) &&
+-		   !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps) &&
+ 		   !ether_addr_equal(macaddr, vf->default_lan_addr.addr)) {
+ 		/* If the host VMM administrator has set the VF MAC address
+ 		 * administratively via the ndo_set_vf_mac command then deny
+ 		 * permission to the VF to add or delete unicast MAC addresses.
+-		 * Unless the VF is privileged and then it can do whatever.
+ 		 * The VF may request to set the MAC address filter already
+ 		 * assigned to it so do not return an error in that case.
+ 		 */
+ 		dev_err(&pf->pdev->dev,
+-			"VF attempting to override administratively set MAC address, reload the VF driver to resume normal operation\n");
++			"VF attempting to override administratively set MAC address\nPlease reload the VF driver to resume normal operation\n");
+ 		ret = -EPERM;
+ 	} else if ((vf->num_mac >= I40E_VC_MAX_MAC_ADDR_PER_VF) &&
+ 		   !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps)) {
+@@ -1898,6 +1889,7 @@ static int i40e_vc_add_mac_addr_msg(struct i40e_vf *vf, u8 *msg, u16 msglen)
+ 	int i;
+ 
+ 	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states) ||
++	    !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps) ||
+ 	    !i40e_vc_isvalid_vsi_id(vf, vsi_id)) {
+ 		ret = I40E_ERR_PARAM;
+ 		goto error_param;
+@@ -1973,6 +1965,7 @@ static int i40e_vc_del_mac_addr_msg(struct i40e_vf *vf, u8 *msg, u16 msglen)
+ 	int i;
+ 
+ 	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states) ||
++	    !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps) ||
+ 	    !i40e_vc_isvalid_vsi_id(vf, vsi_id)) {
+ 		ret = I40E_ERR_PARAM;
+ 		goto error_param;
+@@ -2235,6 +2228,7 @@ static int i40e_vc_config_rss_key(struct i40e_vf *vf, u8 *msg, u16 msglen)
+ 	i40e_status aq_ret = 0;
+ 
+ 	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states) ||
++	    !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps) ||
+ 	    !i40e_vc_isvalid_vsi_id(vf, vsi_id) ||
+ 	    (vrk->key_len != I40E_HKEY_ARRAY_SIZE)) {
+ 		aq_ret = I40E_ERR_PARAM;
+@@ -2267,6 +2261,7 @@ static int i40e_vc_config_rss_lut(struct i40e_vf *vf, u8 *msg, u16 msglen)
+ 	i40e_status aq_ret = 0;
+ 
+ 	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states) ||
++	    !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps) ||
+ 	    !i40e_vc_isvalid_vsi_id(vf, vsi_id) ||
+ 	    (vrl->lut_entries != I40E_VF_HLUT_ARRAY_SIZE)) {
+ 		aq_ret = I40E_ERR_PARAM;
+@@ -2296,7 +2291,8 @@ static int i40e_vc_get_rss_hena(struct i40e_vf *vf, u8 *msg, u16 msglen)
+ 	i40e_status aq_ret = 0;
+ 	int len = 0;
+ 
+-	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states)) {
++	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states) ||
++	    !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps)) {
+ 		aq_ret = I40E_ERR_PARAM;
+ 		goto err;
+ 	}
+@@ -2332,7 +2328,8 @@ static int i40e_vc_set_rss_hena(struct i40e_vf *vf, u8 *msg, u16 msglen)
+ 	struct i40e_hw *hw = &pf->hw;
+ 	i40e_status aq_ret = 0;
+ 
+-	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states)) {
++	if (!test_bit(I40E_VF_STAT_ACTIVE, &vf->vf_states) ||
++	    !test_bit(I40E_VIRTCHNL_VF_CAP_PRIVILEGE, &vf->vf_caps)) {
+ 		aq_ret = I40E_ERR_PARAM;
+ 		goto err;
+ 	}
+@@ -3116,45 +3113,3 @@ int i40e_ndo_set_vf_spoofchk(struct net_device *netdev, int vf_id, bool enable)
+ out:
+ 	return ret;
+ }
+-
+-/**
+- * i40e_ndo_set_vf_trust
+- * @netdev: network interface device structure of the pf
+- * @vf_id: VF identifier
+- * @setting: trust setting
+- *
+- * Enable or disable VF trust setting
+- **/
+-int i40e_ndo_set_vf_trust(struct net_device *netdev, int vf_id, bool setting)
+-{
+-	struct i40e_netdev_priv *np = netdev_priv(netdev);
+-	struct i40e_pf *pf = np->vsi->back;
+-	struct i40e_vf *vf;
+-	int ret = 0;
+-
+-	/* validate the request */
+-	if (vf_id >= pf->num_alloc_vfs) {
+-		dev_err(&pf->pdev->dev, "Invalid VF Identifier %d\n", vf_id);
+-		return -EINVAL;
+-	}
+-
+-	if (pf->flags & I40E_FLAG_MFP_ENABLED) {
+-		dev_err(&pf->pdev->dev, "Trusted VF not supported in MFP mode.\n");
+-		return -EINVAL;
+-	}
+-
+-	vf = &pf->vf[vf_id];
+-
+-	if (!vf)
+-		return -EINVAL;
+-	if (setting == vf->trusted)
+-		goto out;
+-
+-	vf->trusted = setting;
+-	i40e_vc_notify_vf_reset(vf);
+-	i40e_reset_vf(vf, false);
+-	dev_info(&pf->pdev->dev, "VF %u is now %strusted\n",
+-		 vf_id, setting ? "" : "un");
+-out:
+-	return ret;
+-}
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.h b/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.h
+index 8751741..9f4d52a 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.h
++++ b/drivers/net/ethernet/intel/i40e/i40e_virtchnl_pf.h
+@@ -90,7 +90,6 @@ struct i40e_vf {
+ 	struct i40e_virtchnl_ether_addr default_fcoe_addr;
+ 	u16 port_vlan_id;
+ 	bool pf_set_mac;	/* The VMM admin set the VF MAC address */
+-	bool trusted;
+ 
+ 	/* VSI indices - actual VSI pointers are maintained in the PF structure
+ 	 * When assigned, these will be non-zero, because VSI 0 is always
+@@ -133,7 +132,6 @@ int i40e_ndo_set_vf_port_vlan(struct net_device *netdev,
+ 			      int vf_id, u16 vlan_id, u8 qos);
+ int i40e_ndo_set_vf_bw(struct net_device *netdev, int vf_id, int min_tx_rate,
+ 		       int max_tx_rate);
+-int i40e_ndo_set_vf_trust(struct net_device *netdev, int vf_id, bool setting);
+ int i40e_ndo_get_vf_config(struct net_device *netdev,
+ 			   int vf_id, struct ifla_vf_info *ivi);
+ int i40e_ndo_set_vf_link_state(struct net_device *netdev, int vf_id, int link);
+-- 
+1.8.3.1
+

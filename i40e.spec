@@ -1,7 +1,7 @@
 %define kmod_name		i40e
-%define kmod_driver_version	1.3.21_k
+%define kmod_driver_version	1.5.10_k
 %define kmod_rpm_release	1
-%define kmod_git_hash		1543d85e3dd1402bda134e4dda6e6357daf2ed55
+%define kmod_git_hash		40b15b9e0eb1b331906d70b561974ebbdf49730d
 %define kmod_kernel_version	3.10.0-327.el7
 %define kernel_version		3.10.0-327.el7
 %define kmod_kbuild_dir		drivers/net/ethernet/intel/i40e
@@ -17,6 +17,7 @@ Source4:	find-provides.ksyms
 Source5:	kmodtool			
 Source6:	symbols.greylist-x86_64			
 
+Patch0:		i40e.patch
 
 %define __find_requires %_sourcedir/find-requires.ksyms
 %define __find_provides %_sourcedir/find-provides.ksyms %{kmod_name} %{?epoch:%{epoch}:}%{version}-%{release}
@@ -43,6 +44,7 @@ ExclusiveArch:  x86_64
 
 %prep
 %setup
+%patch0 -p1
 set -- *
 mkdir source
 mv "$@" source/
@@ -101,6 +103,10 @@ fi
 rm -rf $RPM_BUILD_ROOT
 
 %changelog
+* Wed Jun 08 2016 Petr Oros <poros@redhat.com> 1.5.10_k 1
+- Update i40e to 1.5.10_k
+- Resolves: #1347173
+
 * Wed Jan 20 2016 Petr Oros <poros@redhat.com> 1.3.21_k 1
 - Resolves: #1316161
 - i40e DUP module
