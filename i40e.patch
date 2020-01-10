@@ -84,17 +84,11 @@ diff --git a/drivers/net/ethernet/intel/i40e/i40e_main.c b/drivers/net/ethernet/
 index 355d18f..a07b021 100644
 --- a/drivers/net/ethernet/intel/i40e/i40e_main.c
 +++ b/drivers/net/ethernet/intel/i40e/i40e_main.c
-@@ -111,6 +111,17 @@ MODULE_VERSION(DRV_VERSION);
+@@ -111,6 +111,11 @@ MODULE_VERSION(DRV_VERSION);
  
  static struct workqueue_struct *i40e_wq;
  
-+#ifdef CONFIG_OF
-+static inline struct device_node *pci_bus_to_OF_node(struct pci_bus *bus)
-+{
-+        return bus ? bus->dev.of_node : NULL;
-+}
-+
-+#else /* CONFIG_OF */
++#ifndef CONFIG_OF
 +static inline struct device_node *
 +pci_device_to_OF_node(const struct pci_dev *pdev) { return NULL; }
 +#endif  /* CONFIG_OF */
